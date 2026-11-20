@@ -1,0 +1,36 @@
+[package]
+name = "ridgewarden-status"
+version = "0.1.0"
+description = "Regional status page for AREDN meshes: green, yellow or red per site and service, in plain words, for served agencies"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Londopy"]
+repository = "https://github.com/Londopy/ridgewarden-status"
+homepage = "https://github.com/Londopy/ridgewarden-status"
+rust-version = "1.88"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query"] }
+clap = { version = "4.6.8", features = ["derive"] }
+# the core's shared client crate, from a sibling checkout of github.com/Londopy/ridgewarden
+ridgewarden-client = { path = "../ridgewarden/crates/ridgewarden-client" }
+# the status page is a read-only view of these two apps; it reuses their analysis code
+ridgewarden-health = { path = "../ridgewarden-health" }
+ridgewarden-linkdoctor = { path = "../ridgewarden-linkdoctor" }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+toml = "1.2.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
