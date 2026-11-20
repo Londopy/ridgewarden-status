@@ -1,0 +1,14 @@
+# Anubis bot policy for the mesh status mirror. The first matching rule wins, so the
+# machine endpoints go above the default import.
+bots:
+  # the badge, the embed and the JSON are loaded by other sites' pages and by programs,
+  # which can't run the challenge (and third-party frames often can't keep its cookie)
+  - name: status-embeds
+    path_regex: ^/(badge\.svg|embed\.html|status\.json)$
+    action: ALLOW
+  - name: well-known
+    path_regex: ^/\.well-known/
+    action: ALLOW
+
+  # upstream defaults, kept current by Anubis releases
+  - import: (data)/meta/default-config.yaml

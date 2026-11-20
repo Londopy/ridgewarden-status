@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    if ! id ridgewarden-status >/dev/null 2>&1; then
+        adduser --system --group --home /var/lib/ridgewarden-status --no-create-home ridgewarden-status
+    fi
+    adduser ridgewarden-status ridgewarden >/dev/null
+    install -d -m 750 -o ridgewarden-status -g ridgewarden-status /var/lib/ridgewarden-status
+    # an upgrade from when apps ran as the core's user leaves files it owned
+    chown -R ridgewarden-status:ridgewarden-status /var/lib/ridgewarden-status
+    if [ ! -f /etc/ridgewarden/status.toml ]; then
+        /usr/bin/ridgewarden-status --config /etc/ridgewarden/status.toml init
+    fi
+    # its webhook URLs and passphrases are for this app only, not the other apps
+    # in the ridgewarden group
+    chown root:ridgewarden-status /etc/ridgewarden/status.toml
+    chmod 640 /etc/ridgewarden/status.toml
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        # start once the core is set up; until then there's nothing to follow
+        if [ -f /etc/ridgewarden/ridgewarden.toml ]; then
+            systemctl enable ridgewarden-status >/dev/null 2>&1 || true
+            systemctl restart ridgewarden-status || true
+        fi
+    fi
+fi

@@ -1,0 +1,14 @@
+# The public name: Caddy gets the certificate and sends everything through Anubis.
+status.example.org {
+	reverse_proxy anubis:8923
+}
+
+# Only Anubis reaches this, over the compose network. The files change every minute, so
+# browsers check back each time instead of keeping an old copy.
+:8080 {
+	root * /srv/site
+	file_server
+	header Cache-Control "no-cache"
+	# club pages fetch the JSON from their own scripts
+	header /status.json Access-Control-Allow-Origin "*"
+}
