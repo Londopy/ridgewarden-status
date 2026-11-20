@@ -1,12 +1,10 @@
 # Changelog
 
-All notable changes to ridgewarden-status are listed here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html). The section for a version is
-what appears on its GitHub release page. Validated in CI by
-[patchnotes](https://github.com/Londopy/patchnotes).
+All notable changes to ridgewarden-status are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The section for a version is what appears on its GitHub release page. Validated in CI by [patchnotes](https://github.com/Londopy/patchnotes).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-11-20
 
 ### Added
 
@@ -32,4 +30,5 @@ what appears on its GitHub release page. Validated in CI by
 - A push heartbeat that stops checking in turns its site yellow, labelled as a heartbeat. Links that only measure below their plan don't.
 - Pages come from a view rebuilt in the background every 20 seconds, so a page never waits for the analysis.
 
-[Unreleased]: https://github.com/Londopy/ridgewarden-status/commits/main
+[Unreleased]: https://github.com/Londopy/ridgewarden-status/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Londopy/ridgewarden-status/releases/tag/v0.1.0
