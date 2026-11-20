@@ -26,7 +26,7 @@ jobs:
       version: ${{ steps.tag.outputs.version }}
     steps:
       # a manual run rebuilds an existing tag, so check out that tag, not main
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -75,24 +75,24 @@ jobs:
             deb: arm64
     steps:
       # Cargo.toml points at the core's client crate in a sibling checkout
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.tag }}
           path: ridgewarden-status
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Londopy/ridgewarden
           ref: ${{ env.CORE_REF }}
           path: ridgewarden
 
       # the status page reuses the analysis code of these two apps
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Londopy/ridgewarden-health
           path: ridgewarden-health
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Londopy/ridgewarden-linkdoctor
           path: ridgewarden-linkdoctor
@@ -162,13 +162,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.tag }}
           path: ridgewarden-status
           fetch-depth: 0
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: Londopy/ridgewarden
           ref: ${{ env.CORE_REF }}
