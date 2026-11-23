@@ -375,11 +375,20 @@ mod tests {
             NOW - 2 * MIN,
         );
         let mut c = cfg();
-        assert!(open(&f.conn, &c).unwrap().is_empty(), "anyone may post");
+        c.banner_authors = vec![];
+        assert!(
+            list(&f.conn, &c).unwrap().is_empty(),
+            "nobody may post until someone is listed"
+        );
         c.banner_authors = vec![opened.author.key.clone()];
         let still = open(&f.conn, &c).unwrap();
         assert_eq!(still.len(), 1, "the other station's update is ignored");
         assert_eq!(still[0].updates.len(), 1);
+        c.banner_authors.push(other.clone());
+        assert!(
+            open(&f.conn, &c).unwrap().is_empty(),
+            "once listed, its update resolves it"
+        );
         c.banner_authors = vec![other];
         assert!(
             list(&f.conn, &c).unwrap().is_empty(),
@@ -407,7 +416,9 @@ mod tests {
                 NOW - MIN,
             );
         }
-        let i = &list(&f.conn, &cfg()).unwrap()[0];
+        let mut c = cfg();
+        c.banner_authors.push(key);
+        let i = &list(&f.conn, &c).unwrap()[0];
         let stages: Vec<&str> = i.updates.iter().map(|u| u.stage.as_str()).collect();
         assert_eq!(stages, ["investigating", "monitoring", "resolved"]);
         assert!(!i.is_open());

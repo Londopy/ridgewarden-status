@@ -172,7 +172,7 @@ pub fn ending_after(conn: &Connection, cfg: &Config, t: i64) -> Result<Vec<Notic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{MIN, NOW, cfg, fake, maintenance};
+    use crate::testing::{MIN, NOW, add_as, cfg, fake, maintenance};
     use serde_json::json;
 
     const H: i64 = 60 * MIN;
@@ -212,5 +212,31 @@ mod tests {
         assert!(now[0].active(NOW) && !now[1].active(NOW));
         c.banner_authors = vec!["0".repeat(64)];
         assert!(texts(&c, NOW).is_empty(), "poster not on the list");
+    }
+
+    #[test]
+    fn a_cancel_from_a_station_not_listed_is_ignored() {
+        let mut f = fake();
+        let n = maintenance(&mut f, "tower work", NOW + H, NOW + 2 * H, &[]);
+        let other = "cd".repeat(32);
+        add_as(
+            &mut f,
+            &other,
+            1000,
+            "status.maintenance",
+            json!({"cancel": n.id}),
+            NOW - MIN,
+        );
+        let mut c = cfg();
+        assert_eq!(
+            current(&f.conn, &c, NOW).unwrap().len(),
+            1,
+            "the unlisted station can't call it off"
+        );
+        c.banner_authors.push(other);
+        assert!(
+            current(&f.conn, &c, NOW).unwrap().is_empty(),
+            "once listed, its cancel counts"
+        );
     }
 }

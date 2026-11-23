@@ -207,6 +207,11 @@ fn main() -> Result<()> {
 async fn export(cfg: Config, dir: &Path) -> Result<()> {
     let app = App::new(cfg, false)?;
     catch_up(&app).await?;
+    if let Some(hub) = &app.cfg.power.hub
+        && let Err(e) = app.read_power(hub).await
+    {
+        eprintln!("Power shows as unknown in the copy: {e:#}");
+    }
     let me = app.core.whoami().await?;
     let view = app.build_view(&me.node, &me.key)?;
     let files = mirror::files(&app.cfg, &view, now_ms());
@@ -240,6 +245,13 @@ async fn poster(cfg: Config) -> Result<App> {
         .whoami()
         .await
         .with_context(|| format!("asking the core at {} who this site is", app.core.base()))?;
+    if app.cfg.banner_authors.is_empty() {
+        bail!(
+            "banner_authors is empty, so no page would show the post; add this site's key {} to \
+             banner_authors here and at every site whose page should show it",
+            me.key
+        );
+    }
     if !app.cfg.may_post(&me.key) {
         bail!(
             "this site's key {} isn't in banner_authors, so the post would be ignored; add it there, \
@@ -464,10 +476,10 @@ async fn run(cfg: Config) -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         app.core.base()
     );
-    if !app.cfg.subscriptions.contacts.is_empty() && app.cfg.banner_authors.is_empty() {
-        tracing::warn!(
-            "banner_authors is empty, so any station the core trusts can post incidents that \
-             go out to your subscribed contacts; list the stations that may post"
+    if app.cfg.banner_authors.is_empty() {
+        tracing::info!(
+            "banner_authors is empty, so the page shows no banner, incidents or maintenance; \
+             list the stations that may post"
         );
     }
     spawn_loops(app.clone());
@@ -480,4 +492,54 @@ async fn run(cfg: Config) -> Result<()> {
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A core on a local port whose station has `key`.
+    async fn core(key: &str) -> String {
+        let me = json!({"call": "N0CALL", "key": key, "node": "tst-hilltop"});
+        let app = axum::Router::new().route(
+            "/v1/whoami",
+            axum::routing::get(move || async move { axum::Json(me) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn only_a_listed_site_may_post() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("local.token");
+        std::fs::write(&token, "test-token").unwrap();
+        let mine = "ab".repeat(32);
+        let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
+        cfg.core.url = core(&mine).await;
+        cfg.core.token_file = token;
+        cfg.data_dir = dir.path().to_path_buf();
+        let refusal = |authors: Vec<String>| {
+            let mut c = cfg.clone();
+            c.banner_authors = authors;
+            async move { poster(c).await.err().map(|e| e.to_string()) }
+        };
+
+        let empty = refusal(vec![]).await.unwrap();
+        assert!(
+            empty.contains("banner_authors is empty") && empty.contains(&mine),
+            "{empty}"
+        );
+        let other = refusal(vec!["cd".repeat(32)]).await.unwrap();
+        assert!(
+            other.contains("isn't in banner_authors") && other.contains(&mine),
+            "{other}"
+        );
+        assert!(
+            refusal(vec![mine.to_uppercase()]).await.is_none(),
+            "a listed key may post, in either case"
+        );
+    }
 }
