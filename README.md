@@ -18,18 +18,19 @@ It needs a [ridgewarden](https://github.com/Londopy/ridgewarden) core running on
 - Headline anyone can read: "All 7 sites up." or "North site is cut off since 14:02 UTC; link down: Hilltop relay to North site."
 - "Cut off" comes from the mesh's own host list as seen from your node, not a guess from partial link data. Every site serves the page, so when the mesh splits, each side shows the other as cut off.
 - Old data shows as **UNKNOWN**, never green. A site that goes silent stays on the page as cut off, however long it has been quiet, until you say it's gone for good.
-- Incident banner, signed by the station that set it: `ridgewarden-status banner "Hilltop on generator until Tuesday"`. Limit who may set it with `banner_authors`.
+- Each site's tile says when it was last heard and, if the sites run [sitemon](https://github.com/Londopy/sitemon), what its power reads. A battery alarm from sitemon turns the tile yellow, and keeps it yellow while the hub has nothing newer.
+- Incident banner, signed by the station that set it: `ridgewarden-status banner "Hilltop on generator until Tuesday"`. Only the stations listed in `banner_authors` may set it.
 - Incidents that move through investigating, identified, monitoring and resolved, with a timeline, and a history page for the last 90 days.
 - Planned maintenance notices, shown while under way and for 14 days before.
 - One alert per incident to email, ntfy, Discord or a webhook, resolved when the incident is.
 - Subscriptions for agency contacts: email, SMS through an email-to-SMS gateway, or a webhook, each choosing incidents, maintenance, sites cut off, or all three, for every site or only theirs.
 - A map of the sites in their colors, drawn from the locations their nodes report. No map tiles, so it works with no internet.
-- A wall display for a TV in an EOC, a status badge, and an HTML fragment for club websites.
+- A wall display for a TV in an EOC, a status badge, and an HTML fragment for other websites.
 - For phones in the field: a saved copy of the page that opens with no connection, and an offline cache where the browser allows one.
 - An internet mirror: a read-only copy pushed as plain files to a web server off the mesh, with an example for serving it behind Anubis. The app itself never faces the internet.
 - Notices, incidents and maintenance show up on AREDN node pages through the node's own message feed.
-- An about page that counts how often each page is viewed (counts only, nothing about who) and whether the mirror and subscriptions are getting through.
-- No JavaScript needed: loads on old phones and prints on one page.
+- An about page that counts how often each page is viewed (counts only, nothing about who) and says whether the mirror, the subscriptions and the site monitor are getting through.
+- No JavaScript needed: loads on old phones, and prints on one sheet of Letter or A4 with 20 sites, a few notices and up to about 28 services.
 - `/api/status` returns the same data as JSON.
 
 ## Install
@@ -57,7 +58,7 @@ ridgewarden-status run  --config /etc/ridgewarden/status.toml
 
 The page is on `http://<pi>:8793/`, with `/history`, `/map`, `/wall` and `/about` next to it. Add it to the core's dashboard with an `[[app]]` entry in `ridgewarden.toml`.
 
-The banner, incidents and maintenance notices are signed by this site's core under its callsign, so posting them needs the core's `local.token`. Every site running ridgewarden-status shows them. When `banner_authors` is set and this site's key isn't in it, the commands refuse to post, since every page with that list would ignore the post.
+The banner, incidents and maintenance notices are signed by this site's core under its callsign, so posting them needs the core's `local.token`. Pages show only posts from the stations in `banner_authors`, so list there the keys of the stations that may post (`ridgewarden whoami` prints a station's key), with the same list at every site. Until a key is listed nobody may post, and the commands refuse to post from a site whose key isn't in the list, since every page would ignore the post.
 
 ### Silent sites
 
@@ -68,6 +69,24 @@ ridgewarden-status forget tst-oldsite
 ```
 
 It comes back if it is heard from again. `expected_sites` in the config lists sites to show even before they are first heard from.
+
+### Power at each site
+
+If the sites run [sitemon](https://github.com/Londopy/sitemon)'s agent, the page can show each site's supply from the sitemon hub. Map sitemon's site ids to node names:
+
+```toml
+[power]
+hub = "http://sitemon-hub.local.mesh:8470"
+metric = "batt.v"                            # the reading to show
+rules = ["Battery low", "Battery falling"]   # the hub's rules that mean a power problem
+[power.sites]
+hilltop = "tst-hilltop"
+ridge = "tst-north"
+```
+
+Every two minutes the app reads the hub's `/api/groups` and `/api/group/<slug>` (the first 50 groups), and shows the reading on each mapped site's tile, on the wall and in `/api/status`. An open alert from one of `rules` turns the tile yellow and goes on the tile's power line in the hub's own words, cut to about 24 characters; set `rules` to the rule names in your hub's config. A reading older than `fresh_s` (16 minutes by default, as for everything else on the page) shows as "Power unknown" and changes no color, unless its last word was an alarm: then the tile stays yellow and says how old that reading is ("last reading 20 min ago"). A group that fails keeps its sites' last readings until they age out. Mapped sites the hub doesn't list, or lists without the `metric`, are logged when that list changes and shown on `/about` with whether the hub answers. A hub on the mesh keeps answering when the internet is down.
+
+The hub is read like any web page, over plain HTTP unless its address says https, and its answers aren't signed the way events on the mesh are, so anything that can answer in its place decides what the tiles say about power. The app strips control and direction-changing characters from its text and cuts it short, so it can't stretch a tile or turn its words around.
 
 ### Incidents
 
@@ -95,7 +114,7 @@ ridgewarden-status maintenance cancel 5a2a90a6
 
 ### Wall display
 
-`http://<pi>:8793/wall` is for a TV in an EOC: the headline, notices and large site tiles, nothing to click, reloading every 30 seconds. Up to about 20 sites fit a 1080p screen without scrolling. It follows the screen's light or dark setting.
+`http://<pi>:8793/wall` is for a TV in an EOC: the headline, up to five lines of notices ("And 3 more on the status page." when there are more), and large site tiles saying how long ago each site was heard, nothing to click, reloading every 30 seconds. Up to about 20 sites fit a 1080p screen. With more sites, long reasons or a 4:3 screen, the rows shrink to share the screen and each tile hides whole lines, last first (when it was heard, then the reason), down to its name in its color, so no site drops off the bottom. It follows the screen's light or dark setting.
 
 ### In the field with no connection
 
@@ -111,7 +130,7 @@ Pages served over https, or from `localhost`, also register a small service work
 <iframe src="http://tst-hilltop-pi.local.mesh:8793/embed.html" title="Mesh status" width="500" height="420"></iframe>
 ```
 
-The badge reads like "mesh | OK" in the headline's color, or one site's state with `?site=`. `/embed.html` is a small fragment with its own inline styles: the headline, open incidents, every site and when it was updated. Any site may load these and `/api/status`, and they're cached for a minute. Visitors' browsers fetch them straight from this app, so they only work where people can reach it; for a club website on the internet, point them at the mirror (`badge.svg`, `embed.html` and `status.json` there).
+The badge reads like "mesh | OK" in the headline's color, or one site's state with `?site=`. `/embed.html` is a small fragment with its own inline styles: the headline, open incidents, every site and when it was updated. Any site may load these and `/api/status`, and they're cached for a minute. Visitors' browsers fetch them straight from this app, so they only work where people can reach it; for a website on the internet, point them at the mirror (`badge.svg`, `embed.html` and `status.json` there).
 
 ### Notices on AREDN node pages
 
@@ -181,11 +200,11 @@ every_s = 60
 
 The files are written to `/var/lib/ridgewarden-status/mirror` (or `dir`) and then `command` runs with `{dir}` replaced by that folder. Instead of a command, `put_url` sends each file with an HTTP PUT (WebDAV, for example), with a bearer token from `token_file` if set. The service may only write under `/var/lib/ridgewarden-status`; to write `dir` somewhere else, add that folder with a systemd drop-in (`ReadWritePaths=`).
 
-The copy names only the services listed in `[mirror] services` (none by default: a service list says a lot about a network), and rounds site locations to about a kilometre. The mesh page itself shows everything.
+The public copy has the headline, the banner, open incidents and their history, maintenance, and every site with its color, reason, links and when it was last heard (with the time of day on the wall, since a copy is read long after it is made). It names only the services listed in `[mirror] services` (none by default: a service list says a lot about a network), rounds site locations to about a kilometre, and leaves out each site's power reading and alarms unless `power = true`, since they tell anyone which sites are running low; a site yellow only from a power alarm still shows as needing attention. The mesh page itself shows everything.
 
 What people see when the mesh stops pushing, because it is split or the box is off:
 
-- The pages, the wall and the embed say when the copy was made. Once it is 10 minutes old (or five pushes, if longer), a small script turns that note into a warning ("This copy is 2 hours old: the mesh has stopped sending updates, so treat everything here as unknown") and greys every color: headline, tiles, wall blocks, pills, the map. An embed left open on a club page checks again every minute. Without JavaScript the note still says when the copy was made.
+- The pages, the wall and the embed say when the copy was made. Once it is 10 minutes old (or five pushes, if longer), a small script turns that note into a warning ("This copy is 2 hours old: the mesh has stopped sending updates, so treat everything here as unknown") and greys every color: headline, tiles, wall blocks, pills, the map. An embed left open on another website checks again every minute. Without JavaScript the note still says when the copy was made.
 - The badge is a plain image and can't tell. `deploy/mirror/stale-badge.sh`, run each minute from cron on the web server, swaps in `badge-unknown.svg` once `status.json` is more than 15 minutes old; the next push puts the real badge back.
 - `status.json` has `made`, when the copy was made (Unix milliseconds), so a program can treat an old copy as unknown.
 
@@ -208,7 +227,7 @@ The images are pinned by digest. The bot policy lets `badge.svg`, `embed.html` a
 ```toml
 title = "County mesh"
 key_services = ["winlink", "chat"]   # empty shows every service
-banner_authors = []                  # public keys allowed to post notices and incidents
+banner_authors = []                  # keys of the stations that may post; nobody until one is listed
 fail_after = 3                       # the same as ridgewarden-health's [probe] settings
 ok_after = 2
 contact = "Run by the county backbone team: mesh-status@example.org"
@@ -231,9 +250,9 @@ quiet_hours = "22-6"                 # UTC; only critical alerts go out then
 repeat_hours = 4
 ```
 
-`contact` is shown at the foot of the page and the mirror, so agencies know who to ask for what they need. `[mirror]` (with `services`, the allow-list for the public copy) and `[subscriptions]` (with `max_per_hour`) are described above.
+`contact` is shown at the foot of the page and the mirror, so agencies know who to ask for what they need. `[power]`, `[mirror]` (with `services`, the allow-list for the public copy) and `[subscriptions]` (with `max_per_hour`) are described above.
 
-The app believes only events from stations the core trusts: its own key, plus the keys listed under `[trust]` in `ridgewarden.toml`. With `banner_authors` set, only those stations can post or update the banner, incidents and maintenance. A push heartbeat that stops checking in (see ridgewarden-health) turns its receiving site yellow, labelled as a heartbeat.
+The app believes only events from stations the core trusts: its own key, plus the keys listed under `[trust]` in `ridgewarden.toml`. Of those, only the stations in `banner_authors` can post or update the banner, incidents and maintenance. A push heartbeat that stops checking in (see ridgewarden-health) turns its receiving site yellow, labelled as a heartbeat.
 
 ## Limits
 
@@ -243,6 +262,8 @@ The app believes only events from stations the core trusts: its own key, plus th
 - SMS goes through carriers' email-to-SMS gateways or a webhook to a gateway you run. The app doesn't drive a GSM modem itself, and some carriers have closed their gateways, so check yours with `subscribers test`.
 - Email and SMS were tested against a local webhook and with the message checks in the client crate, not through a real mail server or carrier.
 - The map uses only locations the nodes themselves report; a node without one is listed under the map instead.
+- Not yet run against real AREDN nodes or on Pis in the field. Everything here was tested with the unit tests and live against the core's simulated mesh (ridgewarden-sim).
+- Power was tested against a fake hub in the tests and against sitemon's demo hub, whose sites are simulated, not against sitemon agents measuring real batteries.
 
 ## Building from source
 
