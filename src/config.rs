@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use reqwest::Url;
 use ridgewarden_client::alerts::AlertCfg;
 use ridgewarden_client::util::{norm_node, valid_node};
 use ridgewarden_linkdoctor::config::LinksCfg;
@@ -34,7 +35,7 @@ pub struct Config {
     #[serde(default)]
     pub key_services: Vec<String>,
     /// public keys (hex) allowed to post the banner, incidents and maintenance notices;
-    /// empty allows any station in the log
+    /// empty allows nobody, so the page shows none
     #[serde(default)]
     pub banner_authors: Vec<String>,
     /// friendly site names: node name -> label, e.g. "tst-hilltop" = "Hilltop relay"
@@ -59,6 +60,67 @@ pub struct Config {
     /// Like alerts, configure this on one site only.
     #[serde(default)]
     pub subscriptions: SubscriptionsCfg,
+    #[serde(default)]
+    pub power: PowerCfg,
+}
+
+/// Power at each site, read from a sitemon hub (github.com/Londopy/sitemon) when the sites
+/// run its agent. Set `hub` to turn it on.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct PowerCfg {
+    /// the hub's address, e.g. "http://sitemon-hub.local.mesh:8470"
+    #[serde(default)]
+    pub hub: Option<String>,
+    /// the reading shown as a site's power, named as sitemon names it ("<sensor>.<value>")
+    #[serde(default = "d_power_metric")]
+    pub metric: String,
+    /// sitemon rules whose open alerts mean a power problem
+    #[serde(default = "d_power_rules")]
+    pub rules: Vec<String>,
+    /// sitemon site id -> node name
+    #[serde(default)]
+    pub sites: BTreeMap<String, String>,
+}
+
+impl PowerCfg {
+    /// Whether this node's power is read from the hub.
+    pub fn watches(&self, node: &str) -> bool {
+        self.hub.is_some() && self.sites.values().any(|n| norm_node(n) == node)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let Some(hub) = &self.hub else {
+            return Ok(());
+        };
+        let url = Url::parse(hub).with_context(|| format!("power.hub {hub:?}"))?;
+        if !matches!(url.scheme(), "http" | "https") || url.cannot_be_a_base() {
+            bail!("power.hub {hub:?} is not an http(s) URL");
+        }
+        if self.sites.is_empty() {
+            bail!(
+                "power.sites must map sitemon site ids to node names, e.g. hilltop = \"tst-hilltop\""
+            );
+        }
+        if let Some(n) = self.sites.values().find(|n| !valid_node(&norm_node(n))) {
+            bail!("power.sites: {n:?} is not a node name");
+        }
+        if self.metric.trim().is_empty() {
+            bail!("power.metric is empty");
+        }
+        Ok(())
+    }
+}
+
+impl Default for PowerCfg {
+    fn default() -> Self {
+        Self {
+            hub: None,
+            metric: d_power_metric(),
+            rules: d_power_rules(),
+            sites: BTreeMap::new(),
+        }
+    }
 }
 
 /// A read-only copy of the pages, written as static files and pushed to a web server off
@@ -84,6 +146,10 @@ pub struct MirrorCfg {
     /// otherwise, since a service list says a lot about a network
     #[serde(default)]
     pub services: Vec<String>,
+    /// copy each site's power reading and alarms too; off by default, since they tell
+    /// anyone which sites are running low
+    #[serde(default)]
+    pub power: bool,
 }
 
 impl MirrorCfg {
@@ -169,6 +235,7 @@ impl Default for MirrorCfg {
             token_file: None,
             every_s: d_mirror_every(),
             services: vec![],
+            power: false,
         }
     }
 }
@@ -268,6 +335,12 @@ fn d_sendmail() -> String {
 fn d_per_hour() -> u32 {
     6
 }
+fn d_power_metric() -> String {
+    "batt.v".into()
+}
+fn d_power_rules() -> Vec<String> {
+    vec!["Battery low".into(), "Battery falling".into()]
+}
 
 impl Default for CoreCfg {
     fn default() -> Self {
@@ -295,6 +368,16 @@ impl Config {
         if self.fail_after == 0 || self.ok_after == 0 {
             bail!("fail_after and ok_after must be at least 1");
         }
+        if let Some(k) = self
+            .banner_authors
+            .iter()
+            .find(|k| k.len() != 64 || !k.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            bail!(
+                "banner_authors: {k:?} is not a public key; `ridgewarden whoami` on each station \
+                 prints its key, 64 hex characters"
+            );
+        }
         if let Some(s) = self
             .expected_sites
             .iter()
@@ -315,6 +398,7 @@ impl Config {
         }
         self.mirror.validate()?;
         self.subscriptions.validate()?;
+        self.power.validate()?;
         self.alerts.validate()
     }
 
@@ -332,11 +416,9 @@ impl Config {
 
     /// Whether the station with this key may post the banner, incidents and maintenance.
     pub fn may_post(&self, key: &str) -> bool {
-        self.banner_authors.is_empty()
-            || self
-                .banner_authors
-                .iter()
-                .any(|k| k.eq_ignore_ascii_case(key))
+        self.banner_authors
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(key))
     }
 }
 
@@ -349,7 +431,9 @@ fail_after = 3
 ok_after = 2
 title = "Mesh status"
 key_services = []          # e.g. ["winlink", "chat"]; empty shows every service
-banner_authors = []        # public keys allowed to post notices and incidents; empty = any station
+# public keys (from `ridgewarden whoami`) of the stations that may post the banner, incidents
+# and maintenance. Nobody may until one is listed; list the same keys at every site.
+banner_authors = []
 # who runs this page and how to reach them, shown at its foot
 contact = ""
 # sites to show even before they are first heard from; any site heard from stays listed
@@ -366,6 +450,15 @@ token_file = "/var/lib/ridgewarden/local.token"
 # AREDN nodes in a message group (aredn.@alerts[0].groups) also fetch /aredn/<group>.txt
 [aredn_groups]
 # coast = ["tst-hilltop", "tst-valley"]
+
+# Power at each site, read from a sitemon hub (github.com/Londopy/sitemon) if the sites run its
+# agent. A hub on the mesh keeps answering when the internet is down.
+[power]
+# hub = "http://sitemon-hub.local.mesh:8470"
+metric = "batt.v"                            # the reading shown on each site's tile
+rules = ["Battery low", "Battery falling"]   # sitemon rules that mean a power problem
+[power.sites]                                # sitemon site id = node name
+# hilltop = "tst-hilltop"
 
 # One alert per open incident. Set these up on one site only, or every site sends the same alert.
 [alerts]
@@ -389,6 +482,7 @@ token_file = "/var/lib/ridgewarden/local.token"
 every_s = 60
 # services the public copy may name (case-insensitive part of the name); none otherwise
 services = []
+power = false     # true also copies each site's power reading and alarms
 
 # Agency contacts who get a message about incidents, maintenance and sites cut off. Mail goes
 # out through this box's own sendmail (msmtp, Postfix). Set this up on one site only.
@@ -415,6 +509,63 @@ mod tests {
         c.validate().unwrap();
         assert_eq!(c.listen.port(), 8793);
         assert_eq!((c.fail_after, c.ok_after), (3, 2));
+    }
+
+    #[test]
+    fn banner_authors_are_keys() {
+        let mut c: Config = toml::from_str(EXAMPLE).unwrap();
+        assert!(
+            !c.may_post(&"ab".repeat(32)),
+            "nobody until someone is listed"
+        );
+        c.banner_authors = vec!["AB".repeat(32)];
+        c.validate().unwrap();
+        assert!(c.may_post(&"ab".repeat(32)));
+        for (bad, why) in [
+            ("N0CALL".to_string(), "a callsign"),
+            ("ab".repeat(31), "62 hex characters"),
+            (format!("{}a", "ab".repeat(32)), "65 hex characters"),
+            (
+                format!("zz{}", "ab".repeat(31)),
+                "64 characters, not all hex",
+            ),
+        ] {
+            c.banner_authors = vec![bad];
+            assert!(c.validate().is_err(), "{why} is not a key");
+        }
+    }
+
+    #[test]
+    fn power_needs_a_hub_url_and_mapped_nodes() {
+        let mut c: Config = toml::from_str(EXAMPLE).unwrap();
+        c.power.sites.insert("hilltop".into(), "not a node!".into());
+        c.validate().unwrap();
+        assert!(!c.power.watches("tst-hilltop"), "off without a hub");
+
+        let mut p = PowerCfg {
+            hub: Some("http://sitemon-hub.local.mesh:8470".into()),
+            ..Default::default()
+        };
+        assert!(p.validate().is_err(), "no sites mapped");
+        p.sites.insert("hilltop".into(), "TST-Hilltop".into());
+        p.validate().unwrap();
+        assert!(p.watches("tst-hilltop"));
+        for hub in [
+            "ftp://hub.local.mesh/",
+            "http://",
+            "hub.local.mesh:8470",
+            "mailto:x@y",
+        ] {
+            p.hub = Some(hub.into());
+            assert!(p.validate().is_err(), "{hub} is not a hub URL");
+        }
+        p.hub = Some("https://hub.example.org/sitemon/".into());
+        p.validate().unwrap();
+        p.sites.insert("ridge".into(), "not a node!".into());
+        assert!(p.validate().is_err(), "a bad node name");
+        p.sites.remove("ridge");
+        p.metric = " ".into();
+        assert!(p.validate().is_err(), "no metric");
     }
 
     #[test]

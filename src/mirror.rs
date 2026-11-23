@@ -16,8 +16,8 @@ use crate::embed;
 use crate::pages::{self, Ctx, MIRROR, SERVICE_WORKER};
 use crate::status::Report;
 
-/// The report as the public may see it: only the services `[mirror] services` allows, and
-/// locations rounded to about a kilometre.
+/// The report as the public may see it: only the services `[mirror] services` allows,
+/// locations rounded to about a kilometre, and no power readings unless `[mirror] power`.
 fn public(cfg: &Config, r: &Report) -> Report {
     let mut r = r.clone();
     let allowed = |name: &str| {
@@ -31,6 +31,9 @@ fn public(cfg: &Config, r: &Report) -> Report {
     let round = |x: f64| (x * 100.0).round() / 100.0;
     for s in &mut r.sites {
         s.pos = s.pos.map(|(lat, lon)| (round(lat), round(lon)));
+        if !cfg.mirror.power {
+            s.power = None;
+        }
     }
     r
 }
@@ -152,6 +155,7 @@ async fn run(cmd: &str, dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::power::{Power, Reading};
     use crate::testing::{MIN, NOW, cfg, cut_off_c, fake, poll_at, view};
     use serde_json::json;
 
@@ -242,6 +246,43 @@ mod tests {
         assert_eq!(json["sites"][0]["lat"], 35.12);
         assert_eq!(json["sites"][0]["lon"], -120.65);
         assert!(files.iter().all(|f| !f.1.contains("Camera 3")));
+    }
+
+    #[test]
+    fn the_public_copy_leaves_power_out_unless_asked() {
+        let mut f = fake();
+        cut_off_c(&mut f);
+        let mut c = cfg();
+        let mut v = view(&f, &c, "a");
+        let a = v.report.sites.iter_mut().find(|s| s.node == "a").unwrap();
+        a.power = Some(Power::Reading(Reading {
+            text: "11.9 V".into(),
+            at: NOW - MIN,
+            alarms: vec!["Battery low: 11.9 V".into()],
+        }));
+        let has = |c: &Config, text: &str| files(c, &v, NOW).iter().any(|f| f.1.contains(text));
+        assert!(
+            !has(&c, "11.9 V"),
+            "no reading or alarm anywhere in the copy"
+        );
+        let json: serde_json::Value = serde_json::from_str(
+            &files(&c, &v, NOW)
+                .into_iter()
+                .find(|f| f.0 == "status.json")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert!(
+            json["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["power"].is_null())
+        );
+
+        c.mirror.power = true;
+        assert!(has(&c, "Power 11.9 V: Battery low: 11.9 V."));
     }
 
     #[test]

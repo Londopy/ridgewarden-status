@@ -10,6 +10,7 @@ use ridgewarden_client::core::Projection;
 use ridgewarden_client::ui::Color;
 use ridgewarden_client::util::{human_duration, norm_node, short_time};
 use ridgewarden_health::health::{self, Class, Rules, ServiceView};
+use ridgewarden_health::web::class_color;
 use ridgewarden_linkdoctor::links::{self, AlertKind, LinkState, PairView, Topology};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
@@ -17,6 +18,7 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::incidents::{self, Incident, TEXT_MAX, clip};
 use crate::maintenance::{self, Notice};
+use crate::power::{self, Power, Readings};
 
 #[derive(Clone, Debug)]
 pub struct SiteTile {
@@ -27,6 +29,8 @@ pub struct SiteTile {
     pub reason: String,
     /// (lat, lon) from the node's latest poll, if it reports a location
     pub pos: Option<(f64, f64)>,
+    /// from the site monitor, for sites it watches
+    pub power: Option<Power>,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +97,13 @@ impl Report {
             "sites": self.sites.iter().map(|s| json!({
                 "node": s.node, "label": s.label, "state": s.color.word(), "reason": s.reason,
                 "last_seen": s.last_seen, "lat": s.pos.map(|p| p.0), "lon": s.pos.map(|p| p.1),
+                "power": s.power.as_ref().map(|p| match p {
+                    Power::Reading(r) | Power::Stale(r) => json!({
+                        "reading": r.text, "at": r.at, "alarms": r.alarms,
+                        "fresh": matches!(p, Power::Reading(_)),
+                    }),
+                    Power::Unknown => json!({"reading": null, "at": null, "alarms": [], "fresh": false}),
+                }),
             })).collect::<Vec<_>>(),
             "links": self.links.iter().map(|l| json!({"a": l.a, "b": l.b, "state": link_word(l.state)})).collect::<Vec<_>>(),
             "services": self.services.iter().map(|s| json!({
@@ -259,15 +270,6 @@ pub fn banner(conn: &Connection, cfg: &Config) -> Result<Option<Banner>> {
     Ok(None)
 }
 
-fn service_color(c: Class) -> Color {
-    match c {
-        Class::Up | Class::UnpublishedAlive => Color::Green,
-        Class::Partial => Color::Yellow,
-        Class::Down | Class::Stale => Color::Red,
-        Class::Unknown | Class::Unpublished => Color::Unknown,
-    }
-}
-
 /// The node whose host list was used, when it was polled, and the hosts it could reach.
 struct Reach {
     node: String,
@@ -339,13 +341,14 @@ fn remembered(conn: &Connection) -> Result<BTreeMap<String, i64>> {
 }
 
 /// `anchor` is this site's node and `key` its core's key: the page shows the network from
-/// their side.
+/// their side. `power` is what the site monitor last said.
 pub fn build(
     conn: &Connection,
     cfg: &Config,
     snap: &Snapshot,
     anchor: &str,
     key: &str,
+    power: &Readings,
 ) -> Result<Report> {
     let now = snap.now;
     let mut heard = last_heard(conn)?;
@@ -378,6 +381,7 @@ pub fn build(
     for node in &all {
         let last = heard.get(node).copied();
         let lbl = label(cfg, node);
+        let pw = power::of(&cfg.power, power, node, now, snap.fresh_ms);
         let (color, reason) = if !fresh {
             (Color::Unknown, "No fresh data.".to_string())
         } else if !reachable(node) && heard_fresh(node) {
@@ -392,14 +396,11 @@ pub fn build(
                 ),
             )
         } else if !reachable(node) {
+            // the tile says when it was last heard
             (
                 Color::Red,
                 match last {
-                    Some(t) => format!(
-                        "Not reachable; last heard from {} ({} ago).",
-                        short_time(t),
-                        human_duration(now - t)
-                    ),
+                    Some(_) => "Not reachable.".into(),
                     None => "Not reachable, and not heard from yet.".into(),
                 },
             )
@@ -437,13 +438,19 @@ pub fn build(
                 let up = by_site.get(node.as_str()).map_or(0, |ps| {
                     ps.iter().filter(|p| p.state == LinkState::Up).count()
                 });
-                if up > 0 {
+                let seen = if up > 0 {
+                    format!("Up, {up} link{} seen", if up == 1 { "" } else { "s" })
+                } else {
+                    "Reachable on the mesh".into()
+                };
+                // the alarm itself goes on the tile's power line, which the public copy leaves out
+                if pw.as_ref().is_some_and(Power::alarmed) {
                     (
-                        Color::Green,
-                        format!("Up, {up} link{} seen.", if up == 1 { "" } else { "s" }),
+                        Color::Yellow,
+                        format!("{seen}, but the site needs attention."),
                     )
                 } else {
-                    (Color::Green, "Reachable on the mesh.".into())
+                    (Color::Green, format!("{seen}."))
                 }
             }
         };
@@ -454,6 +461,7 @@ pub fn build(
             last_seen: last,
             reason,
             pos: pos.get(node).copied(),
+            power: pw,
         });
     }
     sites.sort_by(|a, b| a.color.cmp(&b.color).then_with(|| a.label.cmp(&b.label)));
@@ -540,7 +548,7 @@ pub fn build(
         })
         .map(|s| {
             let color = if fresh {
-                service_color(s.class)
+                class_color(s.class)
             } else {
                 Color::Unknown
             };
@@ -653,6 +661,11 @@ mod tests {
             banner(&f.conn, &c).unwrap().is_none(),
             "author not on the list"
         );
+        c.banner_authors = vec![];
+        assert!(
+            banner(&f.conn, &c).unwrap().is_none(),
+            "nobody may post until someone is listed"
+        );
         c.banner_authors = vec![e.author.key.clone()];
         assert!(banner(&f.conn, &c).unwrap().is_some());
         f.add("status.banner", json!({"text": ""}), NOW - MIN);
@@ -705,14 +718,122 @@ mod tests {
             since: None,
         };
         snap.pairs[0].alerts.push(alert(AlertKind::BelowPlan));
-        let r = build(&f.conn, &c, &snap, "a", "").unwrap();
+        let r = build(&f.conn, &c, &snap, "a", "", &Readings::new()).unwrap();
         assert!(r.sites.iter().all(|s| s.color == Color::Green));
         snap.pairs[0].alerts.push(alert(AlertKind::Aim));
-        let r = build(&f.conn, &c, &snap, "a", "").unwrap();
+        let r = build(&f.conn, &c, &snap, "a", "", &Readings::new()).unwrap();
         assert!(
             r.sites.iter().all(|s| s.color == Color::Yellow),
             "an aim problem does"
         );
+    }
+
+    #[test]
+    fn a_power_alarm_needs_attention_even_once_its_reading_is_old() {
+        let mut f = fake();
+        let all = ["a", "b", "c", "d"];
+        poll(&mut f, NOW - 5 * MIN, "a", &["b"], &all);
+        poll(&mut f, NOW - 5 * MIN, "b", &["a"], &all);
+        poll(&mut f, NOW - 5 * MIN, "c", &[], &all);
+        poll(&mut f, NOW - 5 * MIN, "d", &[], &all);
+        let mut c = cfg();
+        c.power.hub = Some("http://127.0.0.1:9/".into());
+        for (id, node) in [("hill", "a"), ("ridge", "b"), ("shack", "c")] {
+            c.power.sites.insert(id.into(), node.into());
+        }
+        let reading = |at, alarms: &[&str]| power::Reading {
+            text: "12.1 V".into(),
+            at,
+            alarms: alarms.iter().map(|a| a.to_string()).collect(),
+        };
+        let low = ["Battery low: 12.06 V..."];
+        let readings = Readings::from([
+            ("a".into(), reading(NOW - MIN, &low)),
+            ("b".into(), reading(NOW - 30 * MIN, &low)),
+            ("c".into(), reading(NOW - 30 * MIN, &[])),
+        ]);
+        let snap = snapshot(&f.conn, &c, NOW, "a").unwrap();
+        let r = build(&f.conn, &c, &snap, "a", "", &readings).unwrap();
+        let tile = |node: &str| r.sites.iter().find(|s| s.node == node).unwrap();
+
+        assert_eq!(tile("a").color, Color::Yellow);
+        assert!(
+            tile("a")
+                .reason
+                .ends_with(", but the site needs attention."),
+            "{}",
+            tile("a").reason
+        );
+        assert!(
+            !tile("a").reason.contains("Battery"),
+            "the alarm stays on the power line, out of the reason"
+        );
+        assert_eq!(
+            tile("b").color,
+            Color::Yellow,
+            "its last word was an alarm, half an hour ago"
+        );
+        assert!(matches!(tile("b").power, Some(Power::Stale(_))));
+        assert_eq!(
+            tile("c").color,
+            Color::Green,
+            "an old reading with no alarm changes nothing"
+        );
+        assert_eq!(
+            tile("c").power.as_ref().unwrap().line(NOW),
+            "Power unknown: last reading 30 min ago."
+        );
+        assert_eq!(tile("d").power, None, "no site monitor there");
+        assert_eq!(r.headline, "All 4 sites reachable; 2 need attention.");
+        let json = r.to_json();
+        let site = |node: &str| {
+            json["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["node"] == node)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(site("a")["power"]["fresh"], true);
+        assert_eq!(site("b")["power"]["fresh"], false);
+        assert_eq!(site("b")["power"]["reading"], "12.1 V");
+        assert!(site("d")["power"].is_null());
+    }
+
+    #[test]
+    fn services_get_the_colors_ridgewarden_health_gives_them() {
+        let mut f = fake();
+        poll(&mut f, NOW - 5 * MIN, "a", &[], &["a"]);
+        let ads = json!([
+            {"host": "a", "name": "Old Camera", "link": "http://a:8081/", "protocol": "tcp"},
+            {"host": "a", "name": "Chat", "link": "http://a:8080/", "protocol": "tcp"},
+        ]);
+        let hash = ridgewarden_client::event::list_hash(&ads);
+        f.add(
+            "mesh.list",
+            json!({"hash": hash, "list": ads}),
+            NOW - 4 * MIN,
+        );
+        f.add(
+            "node.poll",
+            json!({"node": "a", "ok": true, "via": "lan", "ads_hash": hash}),
+            NOW - 4 * MIN,
+        );
+        f.add(
+            "svc.probe",
+            json!({"vantage": "a", "results": [
+                {"name": "Old Camera", "link": "http://a:8081/", "host": "a", "ok": false, "detail": "timed out"},
+                {"name": "Chat", "link": "http://a:8080/", "host": "a", "ok": true, "detail": "HTTP 200"},
+            ]}),
+            NOW - 3 * MIN,
+        );
+        let r = report(&f, &cfg(), "a");
+        let line = |name: &str| r.services.iter().find(|s| s.name == name).unwrap();
+        assert_eq!(line("Old Camera").words, "Listed but never seen working");
+        // ridgewarden-health shows this one yellow; red here would contradict it
+        assert_eq!(line("Old Camera").color, Color::Yellow);
+        assert_eq!(line("Chat").color, Color::Green);
     }
 
     #[test]
@@ -729,7 +850,7 @@ mod tests {
         let r = report(&f, &cfg(), "a");
         let c = r.sites.iter().find(|s| s.node == "c").unwrap();
         assert_eq!(c.color, Color::Red);
-        assert!(c.reason.contains("(10 d ago)"), "{}", c.reason);
+        assert_eq!(c.last_seen, Some(NOW - 10 * DAY));
         assert_eq!(r.headline_color, Color::Red, "not a quiet green");
 
         assert!(forget(&f.conn, "c").unwrap());
@@ -778,7 +899,7 @@ mod tests {
         );
         let c = cfg();
         let snap = snapshot(&f.conn, &c, NOW, "a").unwrap();
-        let r = build(&f.conn, &c, &snap, "a", &mine).unwrap();
+        let r = build(&f.conn, &c, &snap, "a", &mine, &Readings::new()).unwrap();
         assert_eq!(color(&r, "b"), Color::Green, "our own core's poll decides");
     }
 }

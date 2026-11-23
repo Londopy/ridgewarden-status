@@ -13,6 +13,7 @@ pub mod maintenance;
 pub mod map;
 pub mod mirror;
 pub mod pages;
+pub mod power;
 pub mod status;
 pub mod subscribe;
 #[cfg(test)]
@@ -37,6 +38,7 @@ use rusqlite::Connection;
 use crate::config::Config;
 use crate::incidents::{Incident, Incidents};
 use crate::maintenance::Maintenance;
+use crate::power::Monitor;
 use crate::status::{Banners, Report};
 
 pub const PROJECTIONS: &[&dyn Projection] =
@@ -77,9 +79,12 @@ pub struct App {
     pub db: Mutex<Connection>,
     /// a second connection for building the view, so the analysis never holds the first
     reader: Mutex<Connection>,
-    /// for alerts, subscriptions and the mirror, which may go out to the internet over TLS
+    /// for alerts, subscriptions, the mirror and the site monitor, which may be on the
+    /// internet over TLS
     pub alert_http: reqwest::Client,
     pub pushed: Mutex<Sent>,
+    /// what the site monitor's hub last said
+    power: Mutex<Monitor>,
     view: Mutex<Option<Arc<View>>>,
     caught_up: AtomicBool,
 }
@@ -104,6 +109,7 @@ impl App {
             reader: Mutex::new(reader),
             alert_http,
             pushed: Mutex::new(Sent::default()),
+            power: Mutex::new(Monitor::default()),
             view: Mutex::new(None),
             caught_up: AtomicBool::new(false),
         })
@@ -120,7 +126,8 @@ impl App {
         status::remember_sites(&c)?;
         let now = now_ms();
         let snap = status::snapshot(&c, &self.cfg, now, anchor)?;
-        let report = status::build(&c, &self.cfg, &snap, anchor, key)?;
+        let power = self.monitor().readings;
+        let report = status::build(&c, &self.cfg, &snap, anchor, key, &power)?;
         let history = incidents::history(&c, &self.cfg, now)?;
         Ok(View {
             report,
@@ -148,6 +155,42 @@ impl App {
             Some(v) => Ok(v),
             None => self.refresh().await,
         }
+    }
+
+    pub fn monitor(&self) -> Monitor {
+        self.power.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Read every watched site's power from the site monitor's hub, and keep it. Mapped sites
+    /// the hub gives no reading for are logged when that list changes.
+    pub async fn read_power(&self, hub: &str) -> Result<()> {
+        let now = now_ms();
+        let prev = self.monitor().readings;
+        let got = power::fetch(&self.alert_http, hub, &self.cfg.power, now, &prev).await;
+        let mut m = self.power.lock().unwrap_or_else(|e| e.into_inner());
+        let (readings, gaps) = match got {
+            Ok(r) => r,
+            Err(e) => {
+                m.read.failed = Some(now);
+                return Err(e);
+            }
+        };
+        m.readings = readings;
+        m.read.ok = Some(now);
+        if let Some(gaps) = gaps
+            && gaps != m.gaps
+        {
+            if gaps.is_empty() {
+                tracing::info!("site monitor: every mapped site has a reading again");
+            } else {
+                tracing::warn!(
+                    "site monitor: {} No new readings come for them.",
+                    gaps.words(&self.cfg.power.metric)
+                );
+            }
+            m.gaps = gaps;
+        }
+        Ok(())
     }
 
     /// Read the core's feed up to the end. Notices wait until this has worked once.
@@ -228,8 +271,8 @@ where
 }
 
 /// Follow the core's feed, keep the view current, keep history pruned, send alerts and
-/// messages, and keep the mirror current, forever. Alerts and messages run apart, so a
-/// slow mail server can't hold up an alert.
+/// messages, keep the mirror current and read the site monitor, forever. Alerts and
+/// messages run apart, so a slow mail server can't hold up an alert.
 pub fn spawn_loops(app: Arc<App>) {
     let a = app.clone();
     tokio::spawn(async move {
@@ -273,6 +316,18 @@ pub fn spawn_loops(app: Arc<App>) {
                 let r = mirror_round(&a).await;
                 note_push(&a, r);
                 tokio::time::sleep(Duration::from_secs(a.cfg.mirror.every_s)).await;
+            }
+        });
+    }
+    if let Some(hub) = app.cfg.power.hub.clone() {
+        let a = app.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = a.read_power(&hub).await {
+                    tracing::warn!("reading power from the site monitor: {e:#}");
+                }
+                // sitemon samples every 30 s; every two minutes is plenty over a radio link
+                tokio::time::sleep(Duration::from_secs(120)).await;
             }
         });
     }
