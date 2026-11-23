@@ -4,7 +4,7 @@
 
 use std::fmt::Write as _;
 
-use ridgewarden_client::ui::{CSS, Color, Page, pill};
+use ridgewarden_client::ui::{CSS, Color, ICON, Page, pill};
 use ridgewarden_client::util::{esc, human_duration, ms_to_rfc3339, norm_node, short_time};
 
 use crate::Sent;
@@ -503,7 +503,7 @@ pub fn wall(ctx: &Ctx, r: &Report) -> String {
         b,
         "<!doctype html><html lang=en><head><meta charset=utf-8>\
          <meta name=viewport content=\"width=device-width,initial-scale=1\">\
-         <meta http-equiv=refresh content=30><title>Wall - {}</title><style>{CSS}{WALL_CSS}</style>\
+         <meta http-equiv=refresh content=30>{ICON}<title>Wall - {}</title><style>{CSS}{WALL_CSS}</style>\
          </head><body><main>",
         esc(&cfg.title)
     );
@@ -853,8 +853,9 @@ mod tests {
             !html.contains("http-equiv=refresh"),
             "a file can't reload itself"
         );
+        // the tab icon is an inline data URI, so it needs no connection either
         assert!(
-            !html.contains("href="),
+            !html.replace(ICON, "").contains("href="),
             "nothing to follow with no connection"
         );
         assert!(
