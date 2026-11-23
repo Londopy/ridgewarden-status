@@ -151,7 +151,16 @@ async fn about_page(State(app): State<Arc<App>>) -> Result<Html<String>, Fail> {
         .iter()
         .map(|t| delivered.get(&t.id).copied().unwrap_or_default())
         .collect();
-    let page = pages::about(&ctx(&app, &v), &v.report, &usage, mirror, &subs, now_ms());
+    let power = app.cfg.power.hub.is_some().then(|| app.monitor());
+    let page = pages::about(
+        &ctx(&app, &v),
+        &v.report,
+        &usage,
+        mirror,
+        &subs,
+        power.as_ref(),
+        now_ms(),
+    );
     Ok(Html(page))
 }
 

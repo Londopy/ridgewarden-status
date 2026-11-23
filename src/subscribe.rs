@@ -242,6 +242,9 @@ fn site_news(cfg: &Config, r: &Report, w: &Watch) -> News {
         .find(|s| s.node == w.node && s.color == Color::Red)
     {
         news.text += &format!(" {}", t.reason);
+        if let Some(seen) = t.last_seen {
+            news.text += &format!(" Last heard {}.", short_time(seen));
+        }
     }
     if let (Some(up), Some(back)) = (w.up_at, w.back_since) {
         news.id = format!("{id} back");
@@ -794,6 +797,15 @@ mod tests {
         assert!(send(&f, &c, &r, NOW).is_empty());
         assert!(send(&f, &c, &r, NOW + 9 * MIN).is_empty());
         assert_eq!(send(&f, &c, &r, NOW + 10 * MIN).len(), 1);
+        let n = news(&f.conn, &c, &r, NOW + 10 * MIN).unwrap();
+        assert_eq!(
+            n[0].text,
+            format!(
+                "Cut off since {}. Not reachable. Last heard {}.",
+                short_time(NOW),
+                short_time(NOW - 30 * MIN)
+            )
+        );
     }
 
     #[test]

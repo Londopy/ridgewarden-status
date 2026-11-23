@@ -1,5 +1,5 @@
-//! What other sites show: a status badge, and a small HTML fragment for an iframe on a
-//! club website. Both carry their own colors, the light palette of the shared CSS, since
+//! What other sites show: a status badge, and a small HTML fragment for an iframe on
+//! another website. Both carry their own colors, the light palette of the shared CSS, since
 //! the page around them has none of ours.
 
 use std::fmt::Write as _;

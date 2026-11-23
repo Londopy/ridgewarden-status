@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use ridgewarden_client::util::esc;
+use ridgewarden_client::util::{esc, short_time};
 use ridgewarden_linkdoctor::links::LinkState;
 
 use crate::status::{Report, SiteTile};
@@ -72,6 +72,10 @@ pub fn svg(r: &Report) -> Option<String> {
         } else {
             (x + 11.0, "start")
         };
+        let why = match s.last_seen {
+            Some(t) => format!("{} Last heard {}.", s.reason, short_time(t)),
+            None => s.reason.clone(),
+        };
         let _ = write!(
             o,
             "<g><circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"8\" style=\"fill:var(--{});stroke:var(--bg);stroke-width:2\">\
@@ -80,7 +84,7 @@ pub fn svg(r: &Report) -> Option<String> {
             s.color.css(),
             esc(&s.label),
             s.color.word(),
-            esc(&s.reason),
+            esc(&why),
             y + 4.0,
             esc(&s.label)
         );
@@ -184,6 +188,11 @@ mod tests {
         let svg = svg(&r).unwrap();
 
         assert!(site(&svg, "c").contains("var(--red)"), "c is cut off");
+        assert!(
+            site(&svg, "c").contains("Not reachable. Last heard 2027-01-15 07:30 UTC.</title>"),
+            "{}",
+            site(&svg, "c")
+        );
         assert!(site(&svg, "b").contains("var(--green)"));
         assert!(site(&svg, "&lt;A&amp;B&gt;").contains("var(--green)"));
         assert!(!svg.contains("<title>d:"), "0, 0 is no location");

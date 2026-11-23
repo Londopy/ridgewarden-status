@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::config::{Config, EXAMPLE};
 use crate::incidents::{self, Incidents};
 use crate::maintenance::Maintenance;
+use crate::power::Readings;
 use crate::status::{Banners, Report, build, snapshot};
 use crate::{PROJECTIONS, SCHEMAS, View};
 
@@ -34,8 +35,16 @@ pub fn fake() -> Fake {
     f
 }
 
+/// The example config, with the fake station allowed to post.
 pub fn cfg() -> Config {
-    toml::from_str(EXAMPLE).unwrap()
+    let mut c: Config = toml::from_str(EXAMPLE).unwrap();
+    c.banner_authors = vec![fake_key()];
+    c
+}
+
+/// The key `Fake` signs with.
+pub fn fake_key() -> String {
+    Fake::new(vec![]).add("x", json!({}), 0).author.key
 }
 
 /// A poll of `node` at `ts`: its links and the hosts its node can reach.
@@ -78,7 +87,7 @@ pub fn cut_off_c(f: &mut Fake) {
 
 pub fn report(f: &Fake, c: &Config, anchor: &str) -> Report {
     let snap = snapshot(&f.conn, c, NOW, anchor).unwrap();
-    build(&f.conn, c, &snap, anchor, "").unwrap()
+    build(&f.conn, c, &snap, anchor, "", &Readings::new()).unwrap()
 }
 
 /// What the pages are built from, as the app's background task makes it.

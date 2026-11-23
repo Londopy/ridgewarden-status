@@ -5,13 +5,14 @@
 use std::fmt::Write as _;
 
 use ridgewarden_client::ui::{CSS, Color, Page, pill};
-use ridgewarden_client::util::{esc, human_duration, ms_to_rfc3339, short_time};
+use ridgewarden_client::util::{esc, human_duration, ms_to_rfc3339, norm_node, short_time};
 
 use crate::Sent;
 use crate::config::Config;
 use crate::incidents::{Incident, stage_color, stage_word};
 use crate::map;
-use crate::status::{Report, label, labels};
+use crate::power::Monitor;
+use crate::status::{Report, SiteTile, fresh_ms, label, labels};
 use crate::usage::{PAGES, Usage};
 
 pub const SERVICE_WORKER: &str = include_str!("sw.js");
@@ -121,16 +122,17 @@ fn mirror_note(ctx: &Ctx, made: i64) -> String {
          the mesh can reach the internet.",
         short_time(made)
     );
-    let msg = "This copy is {age} old: the mesh has stopped sending updates, so treat \
-               everything here as unknown.";
     age_note(
         made,
         stale_after(ctx.cfg),
         &text,
-        msg,
+        STALE_COPY,
         "class=\"mute small\"",
     )
 }
+
+const STALE_COPY: &str = "This copy is {age} old: the mesh has stopped sending updates, so \
+                          treat everything here as unknown.";
 
 /// Registers the service worker that keeps a copy for when there is no connection. Browsers
 /// only allow it on https and on localhost; elsewhere this does nothing.
@@ -205,7 +207,7 @@ fn services_table(b: &mut String, r: &Report) {
         return;
     }
     b.push_str(
-        "<div class=wrap><table><tr><th>Service</th><th>Site</th><th>State</th><th></th></tr>",
+        "<div class=\"wrap svc\"><table><tr><th>Service</th><th>Site</th><th>State</th><th></th></tr>",
     );
     for s in &r.services {
         let kind = if s.heartbeat {
@@ -225,9 +227,52 @@ fn services_table(b: &mut String, r: &Report) {
     b.push_str("</table></div>");
 }
 
+/// When a site was last heard and what its power reads at `now`, as a line of `class` for
+/// under its tile; `when` words the time, as HTML.
+fn facts(s: &SiteTile, class: &str, now: i64, when: impl Fn(i64) -> String) -> String {
+    let mut f = vec![];
+    if let Some(t) = s.last_seen {
+        f.push(when(t));
+    }
+    if let Some(p) = &s.power {
+        f.push(format!("<span class=pw>{}</span>", esc(&p.line(now))));
+    }
+    if f.is_empty() {
+        return String::new();
+    }
+    format!("<div class=\"{class}\">{}</div>", f.join(" "))
+}
+
+/// "08:32 UTC" on the same day as `now`, otherwise with the date.
+fn heard_time(t: i64, now: i64) -> String {
+    let (at, today) = (short_time(t), short_time(now));
+    if at[..10] == today[..10] {
+        at[11..].to_string()
+    } else {
+        at
+    }
+}
+
+// Tiles break a long word from the mesh or the site monitor rather than run out of the box.
+// On paper the page has to fit one sheet for briefings and binders, so it gets smaller type,
+// tight spacing, tiles flowed down four columns so a tall tile doesn't stretch a whole row,
+// and services in two columns of plain rows. The shared print rules (no nav, black on white)
+// still apply.
+const PAGE_CSS: &str = "<style>.tile{overflow-wrap:anywhere}@media print{\
+body{font-size:9pt;line-height:1.3}h1{font-size:13pt;margin:0 0 3pt}\
+h2{font-size:10.5pt;margin:5pt 0 2pt}.headline{font-size:11pt;padding:3pt 6pt;margin:3pt 0 4pt}\
+.banner{padding:2pt 6pt;margin:2pt 0;border-width:1px}.tiles{display:block;columns:4;column-gap:4pt}\
+.tile{display:block;padding:2pt 5pt;margin:0 0 3pt;break-inside:avoid}.ago{display:none}\
+.pill{padding:0 4pt;font-size:7pt}th,td{padding:1pt 4pt}ul.plain{margin:2pt 0}p{margin:3pt 0}\
+.pw{display:block}.svc{columns:2;column-gap:14pt;overflow:visible}\
+.svc table,.svc tbody{display:block}.svc tr{display:flex;flex-wrap:wrap;break-inside:avoid;\
+border-bottom:1px solid #999}.svc tr:first-child,.svc td:empty{display:none}\
+.svc td{border:0;padding:1pt 3pt}.svc td:first-child{flex:1 1 45%}.svc td:nth-child(2){flex:1 1 30%}\
+.svc td:nth-child(4){flex:1 1 100%;padding-top:0}}</style>";
+
 /// The headline, notices, incidents, maintenance, sites and services.
 fn report_body(cfg: &Config, r: &Report) -> String {
-    let mut b = format!("<h1>{}</h1>", esc(&cfg.title));
+    let mut b = format!("{PAGE_CSS}<h1>{}</h1>", esc(&cfg.title));
     if let Some(bn) = &r.banner {
         let _ = write!(
             b,
@@ -252,9 +297,17 @@ fn report_body(cfg: &Config, r: &Report) -> String {
     maintenance_list(&mut b, cfg, r);
     b.push_str("<h2>Sites</h2><div class=tiles>");
     for s in &r.sites {
+        // "4 min ago" means nothing on paper, so print leaves it out
+        let seen = facts(s, "mute small", r.generated, |t| {
+            format!(
+                "Last heard {}<span class=ago> ({} ago)</span>.",
+                heard_time(t, r.generated),
+                human_duration(r.generated - t)
+            )
+        });
         let _ = write!(
             b,
-            "<div class=\"tile {}\"><div class=name>{} {}</div><div class=why>{}</div></div>",
+            "<div class=\"tile {}\"><div class=name>{} {}</div><div class=why>{}</div>{seen}</div>",
             s.color.css(),
             esc(&s.label),
             pill(s.color, s.color.word()),
@@ -392,24 +445,30 @@ pub fn map(ctx: &Ctx, r: &Report) -> String {
     ctx.page(ctx.site.map, "Map", &b, true)
 }
 
-// sized in units of the screen's short side, so 20 sites fit a 1080p TV without scrolling
+// Sized in units of the screen's short side, so 20 sites fit a 1080p TV without scrolling.
+// Past that the rows shrink to share the screen rather than drop off its bottom edge, and a
+// tile's lines that no longer fit wrap into a second column out of sight, whole, last first.
 const WALL_CSS: &str = "
 html{font-size:2vmin}body{overflow:hidden;line-height:1.2}
 main{max-width:none;height:100vh;padding:1.2rem 1.6rem;display:flex;flex-direction:column;gap:.9rem}
 header{display:flex;justify-content:space-between;align-items:baseline;gap:1rem}
 h1{font-size:1.8rem;margin:0}header span{font-size:1.1rem;color:var(--mute)}
+header #copy-age{font-size:1.1rem;margin:0;text-align:right}
 .headline{font-size:2.4rem;margin:0;padding:.8rem 1.2rem}
 .notes{list-style:none;margin:0;padding:0;font-size:1.3rem}
 .notes li{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-left:.4rem solid var(--yellow);padding:.1rem .6rem;margin:.3rem 0}
-.sites{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:.8rem}
-.site{border-radius:.5rem;padding:.6rem .9rem;overflow:hidden}
+.sites{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:.8rem;flex:1;min-height:0;grid-auto-rows:minmax(0,max-content)}
+.site{border-radius:.5rem;padding:.6rem .9rem;overflow:hidden;display:flex;flex-flow:column wrap;align-content:flex-start;column-gap:2rem}
+.site>*{width:100%}
 .site .name{font-size:1.7rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.site .why{font-size:1rem;margin-top:.3rem;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.site .why{font-size:1rem;margin-top:.3rem;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.site .seen{font-size:.9rem;margin-top:.25rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .green{background:var(--green);color:var(--bg)}.yellow{background:var(--yellow);color:var(--bg)}
 .red{background:var(--red);color:var(--bg)}.unknown{background:var(--unknown);color:var(--bg)}
 ";
 
-/// The banner, open incidents and maintenance under way, one line each, for the wall.
+/// The banner, open incidents and maintenance under way, one line each, for the wall: five
+/// lines at most, so the sites keep the screen.
 fn wall_notes(r: &Report) -> Vec<String> {
     let mut notes = vec![];
     if let Some(bn) = &r.banner {
@@ -426,6 +485,12 @@ fn wall_notes(r: &Report) -> Vec<String> {
     for n in r.maintenance.iter().filter(|n| n.active(r.generated)) {
         notes.push(format!("Maintenance {}: {}", n.when(r.generated), n.text));
     }
+    let max = 5;
+    if notes.len() > max {
+        let more = notes.len() - (max - 1);
+        notes.truncate(max - 1);
+        notes.push(format!("And {more} more on the status page."));
+    }
     notes
 }
 
@@ -439,19 +504,31 @@ pub fn wall(ctx: &Ctx, r: &Report) -> String {
         "<!doctype html><html lang=en><head><meta charset=utf-8>\
          <meta name=viewport content=\"width=device-width,initial-scale=1\">\
          <meta http-equiv=refresh content=30><title>Wall - {}</title><style>{CSS}{WALL_CSS}</style>\
-         </head><body><main>{}",
-        esc(&cfg.title),
-        mirror_note(ctx, r.generated)
+         </head><body><main>",
+        esc(&cfg.title)
     );
-    let mut updated = format!("Updated {}", short_time(r.generated));
+    let mut when = short_time(r.generated);
     if !ctx.anchor.is_empty() {
-        let _ = write!(updated, " at {}", label(cfg, ctx.anchor));
+        let _ = write!(when, " at {}", label(cfg, ctx.anchor));
     }
+    // on a copy the header says when it was made, and warns once that was long ago, so the
+    // note takes no line of its own away from the sites
+    let side = if ctx.site.mirror {
+        let text = format!("Copy made {when}; it updates while the mesh can reach the internet.");
+        age_note(
+            r.generated,
+            stale_after(cfg),
+            &text,
+            STALE_COPY,
+            "class=mute",
+        )
+    } else {
+        format!("<span>Updated {}</span>", esc(&when))
+    };
     let _ = write!(
         b,
-        "<header><h1>{}</h1><span>{}</span></header><div class=\"headline {}\">{}</div>",
+        "<header><h1>{}</h1>{side}</header><div class=\"headline {}\">{}</div>",
         esc(&cfg.title),
-        esc(&updated),
         r.headline_color.css(),
         esc(&r.headline)
     );
@@ -465,9 +542,18 @@ pub fn wall(ctx: &Ctx, r: &Report) -> String {
     }
     b.push_str("<div class=sites>");
     for s in &r.sites {
+        let seen = facts(s, "seen", r.generated, |t| {
+            let ago = human_duration(r.generated - t);
+            // a copy is read long after it was made, so it gives the time as well
+            if ctx.site.mirror {
+                format!("Heard {} ({ago} ago).", heard_time(t, r.generated))
+            } else {
+                format!("Heard {ago} ago.")
+            }
+        });
         let _ = write!(
             b,
-            "<div class=\"site {}\"><div class=name>{}</div><div class=why><b>{}</b> {}</div></div>",
+            "<div class=\"site {}\"><div class=name>{}</div><div class=why><b>{}</b> {}</div>{seen}</div>",
             s.color.css(),
             esc(&s.label),
             s.color.word(),
@@ -504,6 +590,42 @@ fn mirror_state(s: Sent, every_ms: i64, now: i64) -> String {
     }
 }
 
+/// Whether the hub answers, how many mapped sites have a fresh reading, and which it gives
+/// no reading for.
+fn monitor_state(m: &Monitor, cfg: &Config, now: i64) -> String {
+    let when = |t: i64| format!("{} ({} ago)", short_time(t), human_duration(now - t));
+    let hub = esc(cfg.power.hub.as_deref().unwrap_or_default());
+    let mut out = match (m.read.ok, m.read.failed) {
+        (_, Some(f)) if failing(&m.read) => format!(
+            "{} reading {hub} failed at {}; the log says why.",
+            pill(Color::Red, "failing"),
+            when(f)
+        ),
+        (Some(o), _) => format!("{} read {hub} {}.", pill(Color::Green, "working"), when(o)),
+        _ => format!("{} {hub} not read yet.", pill(Color::Unknown, "starting")),
+    };
+    let fresh_from = now - fresh_ms(cfg);
+    let fresh = cfg
+        .power
+        .sites
+        .values()
+        .filter(|n| {
+            m.readings
+                .get(&norm_node(n))
+                .is_some_and(|r| r.at >= fresh_from)
+        })
+        .count();
+    let _ = write!(
+        out,
+        " {fresh} of {} mapped sites have a fresh reading.",
+        cfg.power.sites.len()
+    );
+    if !m.gaps.is_empty() {
+        let _ = write!(out, " {}", esc(&m.gaps.words(&cfg.power.metric)));
+    }
+    out
+}
+
 /// Subscriptions in numbers, without naming anyone: this page is open to the whole mesh.
 fn subs_state(subs: &[Sent]) -> String {
     let bad = subs.iter().filter(|s| failing(s)).count();
@@ -537,6 +659,7 @@ pub fn about(
     u: &Usage,
     mirror: Option<Sent>,
     subs: &[Sent],
+    power: Option<&Monitor>,
     now: i64,
 ) -> String {
     let mut b = String::from("<h1>About this page</h1>");
@@ -599,6 +722,16 @@ pub fn about(
     } else {
         let _ = write!(b, "<p>{}</p>", subs_state(subs));
     }
+    b.push_str("<h2>Site monitor</h2>");
+    match power {
+        None => b.push_str(
+            "<p class=mute>Off. Set up [power] in the config to show each site's power from a \
+             sitemon hub.</p>",
+        ),
+        Some(m) => {
+            let _ = write!(b, "<p>{}</p>", monitor_state(m, ctx.cfg, now));
+        }
+    }
     let silent: Vec<String> = r
         .sites
         .iter()
@@ -631,7 +764,81 @@ pub fn about(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{cfg, cut_off_c, fake, report};
+    use crate::power::{Reading, Readings};
+    use crate::status::{build, snapshot};
+    use crate::testing::{MIN, NOW, cfg, cut_off_c, fake, report};
+    use serde_json::json;
+
+    #[test]
+    fn tiles_say_when_each_site_was_last_heard_and_what_its_power_reads() {
+        let mut f = fake();
+        cut_off_c(&mut f);
+        let mut c = cfg();
+        c.power.hub = Some("http://127.0.0.1:9/".into());
+        c.power.sites.insert("hill".into(), "a".into());
+        c.power.sites.insert("ridge".into(), "b".into());
+        let readings = Readings::from([(
+            "a".to_string(),
+            Reading {
+                text: "12.6 V".into(),
+                at: NOW - MIN,
+                alarms: vec![],
+            },
+        )]);
+        let snap = snapshot(&f.conn, &c, NOW, "a").unwrap();
+        let r = build(&f.conn, &c, &snap, "a", "", &readings).unwrap();
+        let ctx = Ctx {
+            cfg: &c,
+            site: &APP,
+            anchor: "a",
+        };
+        let html = status(&ctx, &r);
+        let tile = |name: &str| {
+            html.split("<div class=\"tile ")
+                .find(|t| t.starts_with(&format!("{}\"><div class=name>{name} ", color(&r, name))))
+                .unwrap_or_else(|| panic!("no tile for {name}: {html}"))
+        };
+        assert!(
+            tile("c").contains("Last heard 07:30 UTC<span class=ago> (30 min ago)</span>."),
+            "{}",
+            tile("c")
+        );
+        assert!(tile("c").contains("Not reachable."), "cut off");
+        assert!(
+            tile("a").contains("(5 min ago)</span>. <span class=pw>Power 12.6 V.</span>"),
+            "{}",
+            tile("a")
+        );
+        assert!(
+            tile("b").contains("Power unknown: no recent reading"),
+            "{}",
+            tile("b")
+        );
+        assert!(!tile("c").contains("Power"), "c has no site monitor");
+
+        let wall = wall(&ctx, &r);
+        assert!(wall.contains("Heard 30 min ago.</div>"), "{wall}");
+        assert!(
+            wall.contains("Heard 5 min ago. <span class=pw>Power 12.6 V.</span></div>"),
+            "{wall}"
+        );
+    }
+
+    fn color(r: &Report, node: &str) -> &'static str {
+        r.sites.iter().find(|s| s.node == node).unwrap().color.css()
+    }
+
+    #[test]
+    fn a_time_from_another_day_keeps_its_date() {
+        let day = 24 * 60 * MIN;
+        assert_eq!(heard_time(NOW - 30 * MIN, NOW), "07:30 UTC");
+        assert_eq!(heard_time(NOW - 10 * day, NOW), "2027-01-05 08:00 UTC");
+        assert_eq!(
+            heard_time(NOW - 9 * 60 * MIN, NOW),
+            "2027-01-14 23:00 UTC",
+            "yesterday"
+        );
+    }
 
     #[test]
     fn a_saved_copy_stands_alone() {
@@ -678,7 +885,7 @@ mod tests {
             failed: None,
         };
         let subs = [pushed(minute), Sent::default()];
-        let page = |m| about(&ctx, &r, &u, Some(m), &subs, now);
+        let page = |m| about(&ctx, &r, &u, Some(m), &subs, None, now);
         assert!(page(pushed(minute)).contains(">working<"));
         assert!(
             page(pushed(60 * minute)).contains(">stalled<"),
@@ -691,5 +898,90 @@ mod tests {
         assert!(page(failed).contains(">failing<"));
         let html = page(pushed(minute));
         assert!(html.contains("2 channels set up."), "{html}");
+    }
+
+    #[test]
+    fn the_about_page_says_whether_the_site_monitor_answers() {
+        let f = fake();
+        let mut c = cfg();
+        c.power.hub = Some("http://hub.local.mesh:8470".into());
+        c.power.sites.insert("hill".into(), "a".into());
+        c.power.sites.insert("ridge".into(), "b".into());
+        let r = report(&f, &c, "a");
+        let ctx = Ctx {
+            cfg: &c,
+            site: &APP,
+            anchor: "a",
+        };
+        let u = Usage {
+            views: vec![],
+            feed: vec![],
+        };
+        let mut m = Monitor::default();
+        m.read.ok = Some(NOW - MIN);
+        let fresh = Reading {
+            text: "12.6 V".into(),
+            at: NOW - MIN,
+            alarms: vec![],
+        };
+        m.readings.insert("a".into(), fresh);
+        m.gaps.unlisted.insert("ridge".into());
+        let page = |m: &Monitor| about(&ctx, &r, &u, None, &[], Some(m), NOW);
+        let html = page(&m);
+        assert!(html.contains(">working<"), "{html}");
+        assert!(
+            html.contains(
+                "1 of 2 mapped sites have a fresh reading. Not listed by the hub: ridge."
+            ),
+            "{html}"
+        );
+        m.read.failed = Some(NOW);
+        assert!(page(&m).contains(">failing<"));
+        assert!(about(&ctx, &r, &u, None, &[], None, NOW).contains("Off. Set up [power]"));
+    }
+
+    #[test]
+    fn the_wall_shows_five_notes_at_most() {
+        let notes = |n: usize| {
+            let mut f = fake();
+            cut_off_c(&mut f);
+            for i in 0..n {
+                f.add(
+                    "status.incident",
+                    json!({"title": format!("Problem {i}"), "stage": "investigating"}),
+                    NOW - MIN,
+                );
+            }
+            wall_notes(&report(&f, &cfg(), "a"))
+        };
+        assert_eq!(notes(5).len(), 5, "five fit");
+        let seven = notes(7);
+        assert_eq!(seven.len(), 5);
+        assert_eq!(seven[4], "And 3 more on the status page.");
+    }
+
+    #[test]
+    fn the_mirror_wall_gives_clock_times() {
+        let mut f = fake();
+        cut_off_c(&mut f);
+        let c = cfg();
+        let r = report(&f, &c, "a");
+        let shown = |site| {
+            wall(
+                &Ctx {
+                    cfg: &c,
+                    site,
+                    anchor: "a",
+                },
+                &r,
+            )
+        };
+        let copy = shown(&MIRROR);
+        assert!(copy.contains("Heard 07:30 UTC (30 min ago).</div>"));
+        assert!(
+            copy.contains("<header><h1>Mesh status</h1><p id=copy-age class=mute"),
+            "the copy's age goes in the header, not on a line of its own: {copy}"
+        );
+        assert!(shown(&APP).contains("Heard 30 min ago.</div>"));
     }
 }
